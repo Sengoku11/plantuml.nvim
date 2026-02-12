@@ -1,11 +1,11 @@
 # plantuml.nvim
 
-Lightweight Neovim plugin to render PlantUML as ASCII text or image.
+Lightweight Neovim plugin to render PlantUML as ASCII text, Unicode text, or image.
 
 ## Features
 
 - Works with `.puml` files and with `.md` files (renders code block under cursor).
-- Supported in any terminal: renders in ASCII.
+- Supported in any terminal: renders in ASCII and Unicode text (`utxt`).
 
 ## Requirements
 
@@ -22,6 +22,7 @@ Via `lazy.nvim`:
   "Sengoku11/plantuml.nvim",
   keys = {
     { "<leader>pl", "<cmd>PlantumlRenderAscii<cr>", desc = "Render UML Ascii" },
+    { "<leader>pu", "<cmd>PlantumlRenderUtxt<cr>", desc = "Render UML Unicode" },
     { "<leader>pi", "<cmd>PlantumlRenderImg<cr>", desc = "Render UML Image" },
   },
   opts = {},
@@ -42,3 +43,9 @@ opts = {
   },
 }
 ```
+
+## Commands
+
+- `:PlantumlRenderAscii [right|bottom|fullscreen]`
+- `:PlantumlRenderUtxt [right|bottom|fullscreen]`
+- `:PlantumlRenderImg [right|bottom|fullscreen]`

@@ -1,5 +1,6 @@
 local M = {}
 local ascii_renderer_command = { "plantuml", "-ttxt", "-pipe" }
+local utxt_renderer_command = { "plantuml", "-tutxt", "-pipe" }
 local image_renderer_command = { "plantuml", "-tpng", "-pipe" }
 local ascii_output_state = {
 	buffer = nil,
@@ -474,6 +475,14 @@ local function ensure_image_buffer(path)
 end
 
 function M.render_ascii(mode)
+	return M.render_text(mode, ascii_renderer_command)
+end
+
+function M.render_utxt(mode)
+	return M.render_text(mode, utxt_renderer_command)
+end
+
+function M.render_text(mode, command)
 	local resolved_mode, mode_err = normalize_mode(mode)
 	if not resolved_mode then
 		notify(mode_err, vim.log.levels.ERROR)
@@ -486,7 +495,7 @@ function M.render_ascii(mode)
 		return
 	end
 
-	local code, stdout, stderr = run_renderer(ascii_renderer_command, ensure_plantuml_markers(source), false)
+	local code, stdout, stderr = run_renderer(command, ensure_plantuml_markers(source), false)
 	if code ~= 0 then
 		notify(render_error(code, stdout, stderr), vim.log.levels.ERROR)
 		return
@@ -570,6 +579,17 @@ local function create_command()
 		M.render_ascii(mode)
 	end, {
 		desc = "Render PlantUML as ASCII text",
+		nargs = "?",
+		complete = function()
+			return { "right", "bottom", "fullscreen" }
+		end,
+	})
+
+	vim.api.nvim_create_user_command("PlantumlRenderUtxt", function(opts)
+		local mode = opts.args ~= "" and opts.args or nil
+		M.render_utxt(mode)
+	end, {
+		desc = "Render PlantUML as Unicode text",
 		nargs = "?",
 		complete = function()
 			return { "right", "bottom", "fullscreen" }
