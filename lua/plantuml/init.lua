@@ -15,8 +15,8 @@ local defaults = {
 	filetypes = { "puml" },
 	auto_wrap_markers = true,
 	window = {
-		right_width = 80,
-		bottom_height = 18,
+		right_width_pct = 0.0, -- 0.0..1.0 (0.0 means no forced sizing)
+		bottom_height_pct = 0.0, -- 0.0..1.0 (0.0 means no forced sizing)
 	},
 }
 
@@ -69,6 +69,54 @@ local function render_error(code, stdout, stderr)
 		message = "PlantUML command failed with exit code " .. tostring(code)
 	end
 	return message
+end
+
+local function parse_ratio(value)
+	if type(value) == "number" then
+		return value
+	end
+
+	if type(value) ~= "string" then
+		return nil
+	end
+
+	return tonumber(value:match("^%s*([%d%.]+)%s*$"))
+end
+
+local function resolve_window_size(mode)
+	local window_config = type(config.window) == "table" and config.window or {}
+
+	if mode == "right" then
+		local ratio = parse_ratio(window_config.right_width_pct)
+		if type(ratio) == "number" then
+			ratio = math.max(0.0, math.min(1.0, ratio))
+			if ratio > 0.0 then
+				local width = math.floor(vim.o.columns * ratio)
+				return math.max(1, width)
+			end
+			return nil
+		end
+
+		if type(window_config.right_width) == "number" then
+			return math.max(1, math.floor(window_config.right_width))
+		end
+	elseif mode == "bottom" then
+		local ratio = parse_ratio(window_config.bottom_height_pct)
+		if type(ratio) == "number" then
+			ratio = math.max(0.0, math.min(1.0, ratio))
+			if ratio > 0.0 then
+				local height = math.floor(vim.o.lines * ratio)
+				return math.max(1, height)
+			end
+			return nil
+		end
+
+		if type(window_config.bottom_height) == "number" then
+			return math.max(1, math.floor(window_config.bottom_height))
+		end
+	end
+
+	return nil
 end
 
 local function valid_buffer(buffer)
@@ -373,10 +421,11 @@ local function open_output_window(mode, buffer, state)
 	state.window = win
 	state.buffer = buffer
 
-	if mode == "right" and type(config.window.right_width) == "number" then
-		pcall(vim.api.nvim_win_set_width, win, config.window.right_width)
-	elseif mode == "bottom" and type(config.window.bottom_height) == "number" then
-		pcall(vim.api.nvim_win_set_height, win, config.window.bottom_height)
+	local size = resolve_window_size(mode)
+	if mode == "right" and type(size) == "number" then
+		pcall(vim.api.nvim_win_set_width, win, size)
+	elseif mode == "bottom" and type(size) == "number" then
+		pcall(vim.api.nvim_win_set_height, win, size)
 	end
 
 	return win

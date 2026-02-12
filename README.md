@@ -37,8 +37,8 @@ opts = {
   filetypes = { "puml" }, -- note that markdown will be supported anyways
   auto_wrap_markers = true, -- wraps block with @startuml/@enduml if missing
   window = {
-    right_width = 80,
-    bottom_height = 18,
+    right_width_pct = 0.0, -- ratio 0.0..1.0 (0.0 means no forced sizing)
+    bottom_height_pct = 0.0, -- ratio 0.0..1.0 (0.0 means no forced sizing)
   },
 }
 ```
