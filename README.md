@@ -6,6 +6,7 @@ Lightweight Neovim plugin to render PlantUML as ASCII text, Unicode text, or ima
 
 - Works with `.puml` files and with `.md` files (renders code block under cursor).
 - Supported in any terminal: renders in ASCII and Unicode text (`utxt`).
+- Uses async rendering jobs on Neovim with `vim.system` support to avoid blocking on render.
 
 ## Requirements
 

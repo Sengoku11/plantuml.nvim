@@ -11,6 +11,7 @@ local ascii_output_state = {
 	source_position_mark = nil,
 	mode = nil,
 	command = nil,
+	render_request_id = 0,
 }
 local image_output_state = {
 	buffer = nil,
@@ -19,6 +20,7 @@ local image_output_state = {
 	source_kind = nil,
 	source_position_mark = nil,
 	mode = nil,
+	render_request_id = 0,
 }
 
 local defaults = {
@@ -449,6 +451,28 @@ local function run_renderer(command, source, binary)
 	return vim.v.shell_error, stdout or "", ""
 end
 
+local function run_renderer_async(command, source, binary, callback)
+	if vim.system then
+		vim.system(command, { text = not binary, stdin = source }, function(result)
+			vim.schedule(function()
+				callback(result.code, result.stdout or "", result.stderr or "")
+			end)
+		end)
+		return
+	end
+
+	local code, stdout, stderr = run_renderer(command, source, binary)
+	callback(code, stdout, stderr)
+end
+
+local function should_render_async(opts)
+	if type(opts) == "table" and opts.async ~= nil then
+		return opts.async == true
+	end
+
+	return vim.system ~= nil
+end
+
 local function write_binary_file(path, data)
 	local file, err = io.open(path, "wb")
 	if not file then
@@ -558,8 +582,14 @@ local function open_output_window(mode, buffer, state)
 	return win
 end
 
-local function derive_image_path()
-	local source_path = vim.api.nvim_buf_get_name(0)
+local function derive_image_path(source_buffer)
+	local source_path = ""
+	if valid_buffer(source_buffer) then
+		source_path = vim.api.nvim_buf_get_name(source_buffer)
+	else
+		source_path = vim.api.nvim_buf_get_name(0)
+	end
+
 	local directory = vim.fn.getcwd()
 	local basename = "plantuml"
 
@@ -627,40 +657,56 @@ function M.render_text(mode, command, opts)
 		return
 	end
 
-	local code, stdout, stderr = run_renderer(command, ensure_plantuml_markers(source), false)
-	if code ~= 0 then
-		notify(render_error(code, stdout, stderr), vim.log.levels.ERROR)
-		return
-	end
-
 	update_source_position_mark(ascii_output_state, source_buffer, source_kind, source_cursor)
 	ascii_output_state.mode = resolved_mode
 	ascii_output_state.command = vim.deepcopy(command)
+	ascii_output_state.render_request_id = ascii_output_state.render_request_id + 1
+	local request_id = ascii_output_state.render_request_id
+	local marked_source = ensure_plantuml_markers(source)
 
-	local window, buffer = find_existing_output_window(ascii_output_state, is_ascii_output_buffer)
-	if not valid_buffer(buffer) then
+	local function apply_output(code, stdout, stderr)
+		if request_id ~= ascii_output_state.render_request_id then
+			return
+		end
+
+		if code ~= 0 then
+			notify(render_error(code, stdout, stderr), vim.log.levels.ERROR)
+			return
+		end
+
+		local window, buffer = find_existing_output_window(ascii_output_state, is_ascii_output_buffer)
+		if not valid_buffer(buffer) then
+			if opts.skip_open_if_hidden then
+				return
+			end
+			buffer = create_output_buffer(stdout)
+			open_output_window(resolved_mode, buffer, ascii_output_state)
+			return
+		end
+
+		set_output_content(buffer, stdout)
+
+		if valid_window(window) then
+			ascii_output_state.window = window
+			ascii_output_state.buffer = buffer
+			disable_soft_wrap(window)
+			return
+		end
+
 		if opts.skip_open_if_hidden then
 			return
 		end
-		buffer = create_output_buffer(stdout)
+
 		open_output_window(resolved_mode, buffer, ascii_output_state)
+	end
+
+	if should_render_async(opts) then
+		run_renderer_async(command, marked_source, false, apply_output)
 		return
 	end
 
-	set_output_content(buffer, stdout)
-
-	if valid_window(window) then
-		ascii_output_state.window = window
-		ascii_output_state.buffer = buffer
-		disable_soft_wrap(window)
-		return
-	end
-
-	if opts.skip_open_if_hidden then
-		return
-	end
-
-	open_output_window(resolved_mode, buffer, ascii_output_state)
+	local code, stdout, stderr = run_renderer(command, marked_source, false)
+	apply_output(code, stdout, stderr)
 end
 
 function M.render_img(mode, opts)
@@ -682,49 +728,65 @@ function M.render_img(mode, opts)
 		return
 	end
 
-	local code, stdout, stderr = run_renderer(image_renderer_command, ensure_plantuml_markers(source), true)
-	if code ~= 0 then
-		notify(render_error(code, stdout, stderr), vim.log.levels.ERROR)
-		return
-	end
-
-	if stdout == "" then
-		notify("PlantUML returned empty image output", vim.log.levels.ERROR)
-		return
-	end
-
-	local image_path = derive_image_path()
-	local written, write_err = write_binary_file(image_path, stdout)
-	if not written then
-		notify("Failed to write rendered image: " .. tostring(write_err), vim.log.levels.ERROR)
-		return
-	end
-
-	local buffer, buffer_err = ensure_image_buffer(image_path)
-	if not buffer then
-		notify(buffer_err, vim.log.levels.ERROR)
-		return
-	end
-
 	update_source_position_mark(image_output_state, source_buffer, source_kind, source_cursor)
 	image_output_state.mode = resolved_mode
+	image_output_state.render_request_id = image_output_state.render_request_id + 1
+	local request_id = image_output_state.render_request_id
+	local image_path = derive_image_path(source_buffer)
+	local marked_source = ensure_plantuml_markers(source)
 
-	local window = select(1, find_existing_output_window(image_output_state, is_image_output_buffer))
-	if valid_window(window) then
-		if vim.api.nvim_win_get_buf(window) ~= buffer then
-			vim.api.nvim_win_set_buf(window, buffer)
+	local function apply_output(code, stdout, stderr)
+		if request_id ~= image_output_state.render_request_id then
+			return
 		end
-		image_output_state.window = window
-		image_output_state.buffer = buffer
-		disable_soft_wrap(window)
+
+		if code ~= 0 then
+			notify(render_error(code, stdout, stderr), vim.log.levels.ERROR)
+			return
+		end
+
+		if stdout == "" then
+			notify("PlantUML returned empty image output", vim.log.levels.ERROR)
+			return
+		end
+
+		local written, write_err = write_binary_file(image_path, stdout)
+		if not written then
+			notify("Failed to write rendered image: " .. tostring(write_err), vim.log.levels.ERROR)
+			return
+		end
+
+		local buffer, buffer_err = ensure_image_buffer(image_path)
+		if not buffer then
+			notify(buffer_err, vim.log.levels.ERROR)
+			return
+		end
+
+		local window = select(1, find_existing_output_window(image_output_state, is_image_output_buffer))
+		if valid_window(window) then
+			if vim.api.nvim_win_get_buf(window) ~= buffer then
+				vim.api.nvim_win_set_buf(window, buffer)
+			end
+			image_output_state.window = window
+			image_output_state.buffer = buffer
+			disable_soft_wrap(window)
+			return
+		end
+
+		if opts.skip_open_if_hidden then
+			return
+		end
+
+		open_output_window(resolved_mode, buffer, image_output_state)
+	end
+
+	if should_render_async(opts) then
+		run_renderer_async(image_renderer_command, marked_source, true, apply_output)
 		return
 	end
 
-	if opts.skip_open_if_hidden then
-		return
-	end
-
-	open_output_window(resolved_mode, buffer, image_output_state)
+	local code, stdout, stderr = run_renderer(image_renderer_command, marked_source, true)
+	apply_output(code, stdout, stderr)
 end
 
 local function with_buffer_context(buffer, callback)
@@ -757,6 +819,7 @@ local function refresh_open_outputs_for_buffer(buffer)
 				M.render_text(ascii_output_state.mode, ascii_output_state.command, {
 					skip_open_if_hidden = true,
 					source_cursor = source_cursor,
+					async = true,
 				})
 			end)
 		end
@@ -770,6 +833,7 @@ local function refresh_open_outputs_for_buffer(buffer)
 				M.render_img(image_output_state.mode, {
 					skip_open_if_hidden = true,
 					source_cursor = source_cursor,
+					async = true,
 				})
 			end)
 		end
