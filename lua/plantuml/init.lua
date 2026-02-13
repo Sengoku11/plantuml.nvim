@@ -23,6 +23,7 @@ local defaults = {
 
 local config = vim.deepcopy(defaults)
 local command_created = false
+local option_group = vim.api.nvim_create_augroup("plantuml_nvim_options", { clear = false })
 
 local function notify(msg, level)
 	vim.notify("[plantuml.nvim] " .. msg, level or vim.log.levels.INFO)
@@ -126,6 +127,15 @@ end
 
 local function valid_window(window)
 	return type(window) == "number" and vim.api.nvim_win_is_valid(window)
+end
+
+local function disable_soft_wrap(window)
+	if not valid_window(window) then
+		return
+	end
+
+	vim.wo[window].wrap = false
+	vim.wo[window].linebreak = false
 end
 
 local function is_ascii_output_buffer(buffer)
@@ -429,6 +439,8 @@ local function open_output_window(mode, buffer, state)
 		pcall(vim.api.nvim_win_set_height, win, size)
 	end
 
+	disable_soft_wrap(win)
+
 	return win
 end
 
@@ -513,6 +525,7 @@ function M.render_text(mode, command)
 	if valid_window(window) then
 		ascii_output_state.window = window
 		ascii_output_state.buffer = buffer
+		disable_soft_wrap(window)
 		return
 	end
 
@@ -563,6 +576,7 @@ function M.render_img(mode)
 		end
 		image_output_state.window = window
 		image_output_state.buffer = buffer
+		disable_soft_wrap(window)
 		return
 	end
 
@@ -613,6 +627,26 @@ end
 function M.setup(opts)
 	config = vim.tbl_deep_extend("force", vim.deepcopy(defaults), opts or {})
 	config.filetypes = normalize_string_list(config.filetypes, defaults.filetypes)
+
+	vim.api.nvim_clear_autocmds({ group = option_group })
+	vim.api.nvim_create_autocmd("FileType", {
+		group = option_group,
+		pattern = config.filetypes,
+		callback = function(args)
+			local windows = vim.fn.win_findbuf(args.buf)
+			for _, window in ipairs(windows) do
+				disable_soft_wrap(window)
+			end
+		end,
+	})
+
+	for _, window in ipairs(vim.api.nvim_list_wins()) do
+		local buffer = vim.api.nvim_win_get_buf(window)
+		if contains(config.filetypes, vim.bo[buffer].filetype) then
+			disable_soft_wrap(window)
+		end
+	end
+
 	create_command()
 end
 
