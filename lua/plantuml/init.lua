@@ -2,19 +2,30 @@ local M = {}
 local ascii_renderer_command = { "plantuml", "-ttxt", "-pipe" }
 local utxt_renderer_command = { "plantuml", "-tutxt", "-pipe" }
 local image_renderer_command = { "plantuml", "-tpng", "-pipe" }
+local source_position_namespace = vim.api.nvim_create_namespace("plantuml_nvim_source_position")
 local ascii_output_state = {
 	buffer = nil,
 	window = nil,
+	source_buffer = nil,
+	source_kind = nil,
+	source_position_mark = nil,
+	mode = nil,
+	command = nil,
 }
 local image_output_state = {
 	buffer = nil,
 	window = nil,
+	source_buffer = nil,
+	source_kind = nil,
+	source_position_mark = nil,
+	mode = nil,
 }
 
 local defaults = {
 	open = "fullscreen", -- right | bottom | fullscreen
 	filetypes = { "puml" },
 	auto_wrap_markers = true,
+	auto_refresh_on_save = true,
 	window = {
 		right_width_pct = 0.0, -- 0.0..1.0 (0.0 means no forced sizing)
 		bottom_height_pct = 0.0, -- 0.0..1.0 (0.0 means no forced sizing)
@@ -129,6 +140,84 @@ local function valid_window(window)
 	return type(window) == "number" and vim.api.nvim_win_is_valid(window)
 end
 
+local function normalize_cursor(cursor)
+	if type(cursor) ~= "table" then
+		return nil
+	end
+
+	local line = tonumber(cursor[1])
+	local col = tonumber(cursor[2])
+	if type(line) ~= "number" or type(col) ~= "number" then
+		return nil
+	end
+
+	line = math.max(1, math.floor(line))
+	col = math.max(0, math.floor(col))
+	return { line, col }
+end
+
+local function update_source_position_mark(state, source_buffer, source_kind, cursor)
+	local previous_buffer = state.source_buffer
+	local previous_mark = state.source_position_mark
+
+	if source_kind ~= "markdown" or not valid_buffer(source_buffer) then
+		if type(previous_mark) == "number" and valid_buffer(previous_buffer) then
+			pcall(vim.api.nvim_buf_del_extmark, previous_buffer, source_position_namespace, previous_mark)
+		end
+		state.source_buffer = source_buffer
+		state.source_kind = source_kind
+		state.source_position_mark = nil
+		return
+	end
+
+	if type(previous_mark) == "number" and previous_buffer ~= source_buffer and valid_buffer(previous_buffer) then
+		pcall(vim.api.nvim_buf_del_extmark, previous_buffer, source_position_namespace, previous_mark)
+		previous_mark = nil
+	end
+
+	local normalized_cursor = normalize_cursor(cursor)
+	if not normalized_cursor then
+		normalized_cursor = vim.api.nvim_win_get_cursor(0)
+	end
+
+	local row = normalized_cursor[1] - 1
+	local col = normalized_cursor[2]
+	local mark_id = previous_mark
+
+	local ok, updated_mark = pcall(vim.api.nvim_buf_set_extmark, source_buffer, source_position_namespace, row, col, {
+		id = type(mark_id) == "number" and mark_id or nil,
+	})
+	state.source_buffer = source_buffer
+	state.source_kind = source_kind
+	if ok then
+		state.source_position_mark = updated_mark
+	else
+		state.source_position_mark = nil
+	end
+end
+
+local function get_state_source_cursor(state)
+	if type(state) ~= "table" or state.source_kind ~= "markdown" then
+		return nil
+	end
+
+	if not valid_buffer(state.source_buffer) then
+		return nil
+	end
+
+	local mark = state.source_position_mark
+	if type(mark) ~= "number" then
+		return nil
+	end
+
+	local ok, pos = pcall(vim.api.nvim_buf_get_extmark_by_id, state.source_buffer, source_position_namespace, mark, {})
+	if not ok or type(pos) ~= "table" or #pos < 2 then
+		return nil
+	end
+
+	return { pos[1] + 1, pos[2] }
+end
+
 local function disable_soft_wrap(window)
 	if not valid_window(window) then
 		return
@@ -227,14 +316,23 @@ local function normalize_mode(mode)
 	return selected
 end
 
-local function get_file_kind()
-	local name = vim.api.nvim_buf_get_name(0)
+local function get_buffer_kind(buffer)
+	local target = buffer
+	if target == nil or target == 0 then
+		target = vim.api.nvim_get_current_buf()
+	end
+
+	if type(target) ~= "number" or not vim.api.nvim_buf_is_valid(target) then
+		return nil
+	end
+
+	local name = vim.api.nvim_buf_get_name(target)
 	local ext = name:match("%.([^.]+)$")
 	if ext then
 		ext = ext:lower()
 	end
 
-	local ft = vim.bo.filetype
+	local ft = vim.bo[target].filetype
 
 	if ext and contains(config.filetypes, ext) then
 		return "puml"
@@ -251,10 +349,25 @@ local function get_file_kind()
 	return nil
 end
 
-local function extract_markdown_source(lines)
-	local cursor = vim.api.nvim_win_get_cursor(0)
-	local cursor_line = cursor[1]
-	local cursor_col = cursor[2] + 1
+local function get_file_kind()
+	return get_buffer_kind(0)
+end
+
+local function extract_markdown_source(lines, cursor)
+	local resolved_cursor = normalize_cursor(cursor) or vim.api.nvim_win_get_cursor(0)
+	local cursor_line = resolved_cursor[1]
+	local cursor_col = resolved_cursor[2] + 1
+
+	if cursor_line < 1 then
+		cursor_line = 1
+	elseif cursor_line > #lines then
+		cursor_line = #lines
+	end
+
+	if cursor_line < 1 then
+		return nil, "Buffer is empty"
+	end
+
 	local block, err = locate_fenced_block(lines, cursor_line)
 
 	if block then
@@ -296,7 +409,8 @@ local function extract_markdown_source(lines)
 	return nil, err or "Cursor is not inside a markdown backtick block"
 end
 
-local function source_from_current_buffer()
+local function source_from_current_buffer(opts)
+	opts = opts or {}
 	local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
 	local kind = get_file_kind()
 
@@ -305,7 +419,7 @@ local function source_from_current_buffer()
 	end
 
 	if kind == "markdown" then
-		return extract_markdown_source(lines)
+		return extract_markdown_source(lines, opts.cursor)
 	end
 
 	return nil, "Unsupported file. Use markdown or a filetype/extension listed in config.filetypes."
@@ -494,14 +608,20 @@ function M.render_utxt(mode)
 	return M.render_text(mode, utxt_renderer_command)
 end
 
-function M.render_text(mode, command)
+function M.render_text(mode, command, opts)
+	opts = opts or {}
 	local resolved_mode, mode_err = normalize_mode(mode)
 	if not resolved_mode then
 		notify(mode_err, vim.log.levels.ERROR)
 		return
 	end
 
-	local source, source_err = source_from_current_buffer()
+	local source_buffer = vim.api.nvim_get_current_buf()
+	local source_kind = get_file_kind()
+	local source_cursor = normalize_cursor(opts.source_cursor)
+	local source, source_err = source_from_current_buffer({
+		cursor = source_cursor,
+	})
 	if not source then
 		notify(source_err, vim.log.levels.ERROR)
 		return
@@ -513,8 +633,15 @@ function M.render_text(mode, command)
 		return
 	end
 
+	update_source_position_mark(ascii_output_state, source_buffer, source_kind, source_cursor)
+	ascii_output_state.mode = resolved_mode
+	ascii_output_state.command = vim.deepcopy(command)
+
 	local window, buffer = find_existing_output_window(ascii_output_state, is_ascii_output_buffer)
 	if not valid_buffer(buffer) then
+		if opts.skip_open_if_hidden then
+			return
+		end
 		buffer = create_output_buffer(stdout)
 		open_output_window(resolved_mode, buffer, ascii_output_state)
 		return
@@ -529,17 +656,27 @@ function M.render_text(mode, command)
 		return
 	end
 
+	if opts.skip_open_if_hidden then
+		return
+	end
+
 	open_output_window(resolved_mode, buffer, ascii_output_state)
 end
 
-function M.render_img(mode)
+function M.render_img(mode, opts)
+	opts = opts or {}
 	local resolved_mode, mode_err = normalize_mode(mode)
 	if not resolved_mode then
 		notify(mode_err, vim.log.levels.ERROR)
 		return
 	end
 
-	local source, source_err = source_from_current_buffer()
+	local source_buffer = vim.api.nvim_get_current_buf()
+	local source_kind = get_file_kind()
+	local source_cursor = normalize_cursor(opts.source_cursor)
+	local source, source_err = source_from_current_buffer({
+		cursor = source_cursor,
+	})
 	if not source then
 		notify(source_err, vim.log.levels.ERROR)
 		return
@@ -569,6 +706,9 @@ function M.render_img(mode)
 		return
 	end
 
+	update_source_position_mark(image_output_state, source_buffer, source_kind, source_cursor)
+	image_output_state.mode = resolved_mode
+
 	local window = select(1, find_existing_output_window(image_output_state, is_image_output_buffer))
 	if valid_window(window) then
 		if vim.api.nvim_win_get_buf(window) ~= buffer then
@@ -580,7 +720,60 @@ function M.render_img(mode)
 		return
 	end
 
+	if opts.skip_open_if_hidden then
+		return
+	end
+
 	open_output_window(resolved_mode, buffer, image_output_state)
+end
+
+local function with_buffer_context(buffer, callback)
+	if not valid_buffer(buffer) then
+		return
+	end
+
+	if vim.api.nvim_get_current_buf() == buffer then
+		callback()
+		return
+	end
+
+	local ok = pcall(vim.api.nvim_buf_call, buffer, callback)
+	if not ok then
+		notify("Failed to refresh PlantUML preview on save", vim.log.levels.WARN)
+	end
+end
+
+local function refresh_open_outputs_for_buffer(buffer)
+	local kind = get_buffer_kind(buffer)
+	if kind ~= "puml" and kind ~= "markdown" then
+		return
+	end
+
+	if ascii_output_state.source_buffer == buffer and type(ascii_output_state.command) == "table" then
+		local window = select(1, find_existing_output_window(ascii_output_state, is_ascii_output_buffer))
+		if valid_window(window) then
+			local source_cursor = get_state_source_cursor(ascii_output_state)
+			with_buffer_context(buffer, function()
+				M.render_text(ascii_output_state.mode, ascii_output_state.command, {
+					skip_open_if_hidden = true,
+					source_cursor = source_cursor,
+				})
+			end)
+		end
+	end
+
+	if image_output_state.source_buffer == buffer then
+		local window = select(1, find_existing_output_window(image_output_state, is_image_output_buffer))
+		if valid_window(window) then
+			local source_cursor = get_state_source_cursor(image_output_state)
+			with_buffer_context(buffer, function()
+				M.render_img(image_output_state.mode, {
+					skip_open_if_hidden = true,
+					source_cursor = source_cursor,
+				})
+			end)
+		end
+	end
 end
 
 local function create_command()
@@ -639,6 +832,16 @@ function M.setup(opts)
 			end
 		end,
 	})
+
+	if config.auto_refresh_on_save then
+		vim.api.nvim_create_autocmd("BufWritePost", {
+			group = option_group,
+			pattern = "*",
+			callback = function(args)
+				refresh_open_outputs_for_buffer(args.buf)
+			end,
+		})
+	end
 
 	for _, window in ipairs(vim.api.nvim_list_wins()) do
 		local buffer = vim.api.nvim_win_get_buf(window)
